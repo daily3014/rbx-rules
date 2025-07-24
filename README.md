@@ -1,4 +1,4 @@
-# Rules - Typed runtime argument validator for Roblox
+# Rules - Typed runtime argument validator for Roblox a
 ## Basic validators
 ### `Rules.void` - Ensures that the passed argument is *void*
 #### Signatures
