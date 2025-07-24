@@ -1,0 +1,24 @@
+name = "daily3014/rules"
+version = "1.0.0"
+description = "Luau implementations of popular hashing/encryption algorithms"
+authors = ["daily3014"]
+repository = "https://github.com/daily3014/rbx-rules"
+license = "MIT"
+
+includes = ["README.md", "pesde.toml", "src/**"]
+
+[target]
+environment = "luau"
+lib = "src/init.luau"
+build_files = ["src"]
+
+[indices]
+default = "https://github.com/pesde-pkg/index"
+
+# [scripts]
+roblox_sync_config_generator = ".pesde/scripts/roblox_sync_config_generator.luau"
+sourcemap_generator = ".pesde/scripts/sourcemap_generator.luau"
+
+[dev_dependencies]
+scripts = { name = "pesde/scripts_rojo", version = "^0.1.0", target = "lune" }
+rojo = { name = "pesde/rojo", version = "^7.4.4", target = "lune" }

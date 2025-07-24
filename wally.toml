@@ -1,0 +1,13 @@
+[package]
+name = "daily3014/rules"
+description = "Fast and typed runtime type checker"
+version = "1.0.0"
+registry = "https://github.com/UpliftGames/wally-index"
+repository = "https://github.com/daily3014/rbx-rules"
+
+realm = "shared"
+license = "MIT"
+authors = ["daily3014"]
+
+include = ["src", "src/**", "default.project.json", "wally.toml"]
+exclude = ["**"]
