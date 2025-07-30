@@ -28,6 +28,7 @@
 --!optimize 2
 --!native
 
+type ConditionalRuleValidator = (ConditionalValue: unknown, Value: unknown) -> (boolean, string?)
 type RuleValidator = (Value: unknown) -> (boolean, string?)
 type VarargRuleValidator = (...unknown) -> (boolean, string?)
 
@@ -137,11 +138,41 @@ do -- Basic
 		Constructors.literal = function(Negated: boolean)
 			local Expected = not Negated
 
-			return function(ExpectedValue: any)
-				local Message = if Negated then `Value cannot be {ExpectedValue}` else `Value is not {ExpectedValue}`
+			return function(...)
+				local LiteralCount = select("#", ...)
+
+				if LiteralCount == 1 then
+					local ExpectedValue = (...)
+
+					local Message = if Negated
+						then `Value cannot be {ExpectedValue}`
+						else `Value is not {ExpectedValue}`
+
+					return function(Value: unknown)
+						local Success = Value == ExpectedValue
+
+						if Success == Expected then
+							return true
+						end
+
+						return false, Message
+					end
+				end
+
+				local List = table.create(LiteralCount)
+				local Map = {}
+
+				for Index, Value in { ... } do
+					List[Index] = Value
+					Map[Value] = true
+				end
+
+				local Message = if Negated
+					then `Value cannot be one of the literals`
+					else `Value is not one of the literals`
 
 				return function(Value: unknown)
-					local Success = Value == ExpectedValue
+					local Success = Map[Value] or table.find(List, Value) ~= nil
 
 					if Success == Expected then
 						return true
@@ -155,6 +186,32 @@ do -- Basic
 
 		Rules.literal = (nil :: any) :: (Expected: any) -> RuleValidator
 		Rules.Literal = (nil :: any) :: typeof(Rules.literal)
+	end
+
+	do -- Conditional
+		Constructors.conditional = function(Negated: boolean)
+			if Negated then
+				error("Rules.conditional can't be negated", 2)
+			end
+
+			return function(Condition: RuleValidator, Validator: RuleValidator): ConditionalRuleValidator
+				return function(ConditinalValue: unknown, Value: unknown)
+					local PassedCondition = Condition(ConditinalValue)
+
+					if not PassedCondition then
+						return true
+					end
+
+					return Validator(Value)
+				end
+			end
+		end
+		Constructors.Conditional = Constructors.conditional
+
+		Rules.conditional = (
+			nil :: any
+		) :: (Condition: RuleValidator, Validator: RuleValidator) -> ConditionalRuleValidator
+		Rules.Conditional = (nil :: any) :: typeof(Rules.conditional)
 	end
 end
 
@@ -574,9 +631,9 @@ do -- Enums
 	Constructors.fromenum = Constructors.from_enum
 	Constructors.FromEnum = Constructors.from_enum
 
-	Rules.from_enum = (nil :: any) :: RuleValidator
-	Rules.fromenum = (nil :: any) :: RuleValidator
-	Rules.FromEnum = (nil :: any) :: RuleValidator
+	Rules.from_enum = (nil :: any) :: (EnumType: Enum) -> RuleValidator
+	Rules.fromenum = (nil :: any) :: typeof(Rules.from_enum)
+	Rules.FromEnum = (nil :: any) :: typeof(Rules.from_enum)
 end
 
 do -- Type Variants
@@ -621,7 +678,7 @@ do -- Type Variants
 				local Elements = table.maxn(ValueCasted)
 				if Elements == 0 then
 					if next(ValueCasted) ~= nil then
-						return false, "Value is not an array"
+						return false, "Value has non-number keys"
 					end
 
 					return true
@@ -629,7 +686,7 @@ do -- Type Variants
 
 				local Key = next(ValueCasted, Elements)
 				if Key ~= nil then
-					return false, "Value is not an array"
+					return false, "Value has non-number keys"
 				end
 
 				local CurrentKey: number?, KeyValue: any = next(ValueCasted)
@@ -801,9 +858,12 @@ do -- Values
 					local ThisSuccess, ThisMessage = Validator(if CheckValue then TableValue else Key)
 
 					if not ThisSuccess then
+						local Path = if #Parent > 0
+							then table.concat(Parent, ".") .. "."
+							else ""
+						
 						Success, Message =
-							ThisSuccess,
-							`{if #Parent > 0 then table.concat(Parent, ".") .. "." else ""}{Key}: {ThisMessage}`
+							ThisSuccess, `{Path}{Key}: {ThisMessage}`
 						break
 					end
 				end
@@ -1239,10 +1299,10 @@ do -- Values
 	do -- Values
 		Constructors.valid_utf8 = function(Negated: boolean)
 			local Expected = not Negated
-
-			if Negated then
-				error("Rules.valid_utf8 can't be negated", 2)
-			end
+			
+			local Message = if Negated
+				then "Value cannot contain valid UTF-8 sequence(s)"
+				else "Value contains invalid UTF-8 sequence(s)"
 
 			return function(Value: unknown)
 				if type(Value) ~= "string" then
@@ -1254,7 +1314,7 @@ do -- Values
 					return true
 				end
 
-				return false, "Value is not valid UTF8"
+				return false, Message
 			end :: RuleValidator
 		end
 		Constructors.validutf8 = Constructors.valid_utf8
@@ -1423,7 +1483,7 @@ do -- Values
 	Constructors.match = function(Negated: boolean)
 		local Expected = not Negated
 
-		return function(Expression: string)
+		return function(Expression: string, Exact: boolean?)
 			local Message = if Negated
 				then `Value must not match the regex expression '{Expression}'`
 				else `Value doesn't match the regex expression '{Expression}'`
@@ -1432,8 +1492,9 @@ do -- Values
 				if type(Value) ~= "string" then
 					return false, "Value isn't of type 'string'"
 				end
-
-				local Success = string.match(Value :: string, Expression) ~= nil
+				
+				local Matched = string.match(Value, Expression)
+				local Success = if Exact == true then Matched == Value else Matched ~= nil
 				if Success == Expected then
 					return true
 				end
@@ -1446,6 +1507,45 @@ do -- Values
 
 	Rules.match = (nil :: any) :: (Expression: string) -> RuleValidator
 	Rules.Match = (nil :: any) :: typeof(Rules.match)
+	
+	local ExtendSyntaxPattern = "%[([^%[%]]-)%]%$(%d+)"
+	local PatternExtender = function(Pattern: string, Repetition: string)
+		return string.rep(Pattern, tonumber(Repetition) or 1)
+	end :: (string) -> string
+	
+	Constructors.uuid_v4 = function(Negated: boolean)
+		local Expression = Constructors.match(Negated)((string.gsub(
+			"[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12",
+			ExtendSyntaxPattern, PatternExtender
+		)))
+		
+		local BracketExpression = Constructors.match(Negated)((string.gsub(
+			"{[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12}",
+			ExtendSyntaxPattern, PatternExtender
+		)))
+		
+		local Message = if Negated
+			then "Value cannot be an UUID"
+			else "Value is not an UUID"
+		
+		return function(Value: unknown)
+			if type(Value) ~= "string" then
+				return false, "Value isn't of type 'string'"
+			end
+			
+			if Expression(Value) or BracketExpression(Value) then
+				return true
+			end
+			
+			return false, Message
+		end :: RuleValidator
+	end
+	Constructors.uuidv4 = Constructors.uuid_v4
+	Constructors.UUIDv4 = Constructors.uuid_v4
+	
+	Rules.uuid_v4 = (nil :: any) :: RuleValidator
+	Rules.uuidv4 = (nil :: any) :: RuleValidator
+	Rules.UUIDv4 = (nil :: any) :: RuleValidator
 end
 
 do -- Special
@@ -1455,34 +1555,49 @@ do -- Special
 		end
 
 		return function(...: RuleValidator): VarargRuleValidator
-			local RuleSet = table.pack(...)
-			local ExpectedArgumentCount = RuleSet.n
+			local RuleSet = { ... }
+			local ArgCounts = table.create(#RuleSet, 0)
+
+			local ExpectedArgumentCount = 0
+			for Index, Rule in RuleSet do
+				if type(Rule) ~= "function" then
+					error(`#{Index}: Expected rule, got {typeof(Rule)}`)
+				end
+
+				local ArgCount, Vararg = debug.info(Rule, "a")
+				ArgCounts[Index] = ArgCount
+
+				if Vararg then
+					error(`#{Index}: Rule cannot take variable amount of arguments`)
+				elseif ArgCount == 0 then
+					error(`#{Index}: Rule must take atleast one argument`)
+				end
+
+				ExpectedArgumentCount += ArgCount
+			end
 
 			return function(...: unknown)
 				local Arguments = table.pack(...)
 				local Count = Arguments.n
 
 				if Count ~= ExpectedArgumentCount then
-					local Error = if Count > ExpectedArgumentCount
-						then `Got more than {ExpectedArgumentCount} arguments`
-						else `Got less than {ExpectedArgumentCount} arguments`
-
-					return false, Error
-				end
-
-				for Index = 1, Count do
-					local Argument = Arguments[Index]
-					local ArgumentValidator = RuleSet[Index]
-
-					if type(ArgumentValidator) ~= "function" then
-						return false, `#{Index}: Expected rule, got {typeof(ArgumentValidator)}`
+					if Count > ExpectedArgumentCount then
+						return false, `Got more than {ExpectedArgumentCount} arguments`
 					end
 
-					local Success, Message = ArgumentValidator(Argument)
+					Arguments.n = ExpectedArgumentCount
+				end
 
+				local Cursor = 1
+				for Index, Rule in RuleSet do
+					local ArgCount = ArgCounts[Index]
+
+					local Success, Message = Rule(table.unpack(Arguments, Cursor, Cursor + ArgCount))
 					if not Success then
 						return false, `#{Index}: {Message}`
 					end
+
+					Cursor += ArgCount
 				end
 
 				return true
@@ -1531,13 +1646,19 @@ do -- Special
 		return function(Validator: RuleValidator): VarargRuleValidator
 			assert(Rules.callback(Validator))
 
+			local ArgSize = debug.info(Validator, "a")
+			ArgSize = math.max(ArgSize, 1)
+
 			return function(...: unknown)
 				local Arguments = table.pack(...)
-				local Count = Arguments.n
 
-				for Index = 1, Count do
-					local Value = Arguments[Index]
-					local Success, Message = Validator(Value)
+				local Needed = -Arguments.n % ArgSize
+				if Needed ~= 0 then
+					Arguments.n += Needed
+				end
+
+				for Index = 1, Arguments.n, ArgSize do
+					local Success, Message = Validator(table.unpack(Arguments, Index, Index + ArgSize - 1))
 
 					if not Success then
 						return false, `#{Index}: {Message}`
@@ -1598,7 +1719,12 @@ do -- Special
 
 		return function(Validator: RuleValidator): (Value: unknown) -> boolean
 			return function(Value: unknown)
-				assert(Validator(Value))
+				local Success, Message = Validator(Value)
+
+				if not Success then
+					assert(false, Message)
+				end
+				
 				return true
 			end
 		end
