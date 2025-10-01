@@ -1123,7 +1123,7 @@ do -- Values
 							ValidateTable(TableValue :: {}, NewParent)
 						end
 
-						if not TreatTablesAsValues then
+						if TreatTablesAsValues == false then
 							continue
 						end
 					end
@@ -1131,7 +1131,7 @@ do -- Values
 					if not Success then
 						break
 					end
-
+					
 					local ThisSuccess, ThisMessage = Validator(if CheckValue then TableValue else Key)
 
 					if not ThisSuccess then
@@ -1145,7 +1145,7 @@ do -- Values
 					end
 				end
 			end
-
+			
 			ValidateTable(Value :: {}, {})
 
 			if Success then
@@ -1667,15 +1667,15 @@ do -- Values
 					for Key, RuleValidator in TableStructure do
 						local TableValue = (Value :: {})[Key]
 
-						if not TableValue and Strict == true then
-							return false, `Value has missing field '{Key}'`
-						end
-
 						if type(RuleValidator) ~= "function" then
 							return false, `{Key}: Expected rule, got {typeof(RuleValidator)}`
 						end
 
 						local Success, Message = RuleValidator(TableValue)
+
+						if TableValue == nil and not Success then
+							return false, `Value has missing field '{Key}'`
+						end
 
 						if not Success then
 							return false, `{Key}: {Message}`
@@ -1806,7 +1806,7 @@ do -- Values
 	end :: (string) -> string
 	
 	Constructors.uuid_v4 = function(Negated: boolean)
-		local UUIDPattern = "[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12"
+		local UUIDPattern = "[%x]$8%-[%x]$4%-4[%x]$3%-[89abAB][%x]$3%-[%x]$12"
 		
 		local Expression = Constructors.match(Negated)((string.gsub(
 			UUIDPattern,
@@ -1827,7 +1827,11 @@ do -- Values
 				return false, "Value isn't of type 'string'"
 			end
 			
-			if Expression(Value) or BracketExpression(Value) then
+			local Matches = if Negated
+				then (Expression(Value)) and (BracketExpression(Value))
+				else (Expression(Value)) or (BracketExpression(Value))
+			
+			if Matches then
 				return true
 			end
 			
