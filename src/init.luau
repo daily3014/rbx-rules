@@ -1,9 +1,7 @@
--- Rules: Runtime typechecker
-
 --[[
 	MIT License
 
-	Copyright (c) 2025 daily
+	Copyright (c) 2025 daily3014
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -32,11 +30,20 @@ type ConditionalRuleValidator = (ConditionalValue: unknown, Value: unknown) -> (
 type RuleValidator = (Value: unknown) -> (boolean, string?)
 type VarargRuleValidator = (...unknown) -> (boolean, string?)
 
+type StrictRuleValidator = (Value: unknown) -> (boolean)
+type StrictVarargRuleValidator = (...unknown) -> (boolean)
+
 type Constructor<T> = (Negated: boolean) -> T
 
 local Constructors = {}
 local Not = {}
 local Rules = {}
+
+local function Assert(Condition: boolean, Message: string?)
+	if not Condition then
+		error(Message or "assertion failed!", 2)
+	end
+end
 
 do
 	local function CreateHook(Negated: boolean)
@@ -67,152 +74,6 @@ do
 
 	setmetatable(Not, { __index = CreateHook(true) })
 	setmetatable(Rules, { __index = CreateHook(false) })
-end
-
-do -- Basic
-	do -- Void
-		Constructors.void = function(Negated: boolean)
-			local Message = if Negated then "Value is void" else "Value isn't void"
-			local Expected = not Negated
-
-			return function(...: unknown)
-				local Success = select("#", ...) == 0
-
-				if Success == Expected then
-					return true
-				end
-
-				return false, Message
-			end
-		end
-		Constructors.Void = Constructors.void
-
-		Rules.void = (nil :: any) :: RuleValidator
-		Rules.Void = (nil :: any) :: typeof(Rules.void)
-	end
-
-	do -- None
-		Constructors.none = function(Negated: boolean)
-			local Message = if Negated then "Value is nil" else "Value isn't nil"
-			local Expected = not Negated
-
-			return function(Value: unknown)
-				local Success = Value == nil
-
-				if Success == Expected then
-					return true
-				end
-
-				return false, Message
-			end
-		end
-		Constructors.None = Constructors.none
-
-		Rules.none = (nil :: any) :: RuleValidator
-		Rules.None = (nil :: any) :: typeof(Rules.none)
-	end
-
-	do -- Optional
-		Constructors.optional = function(Negated: boolean)
-			if Negated then
-				error("Rules.optional can't be negated", 2)
-			end
-
-			return function(Validator: RuleValidator)
-				return function(Value: unknown)
-					if Value == nil then
-						return true, ""
-					end
-
-					return Validator(Value)
-				end :: RuleValidator
-			end
-		end
-		Constructors.Optional = Constructors.optional
-
-		Rules.optional = (nil :: any) :: (Validator: RuleValidator) -> RuleValidator
-		Rules.Optional = (nil :: any) :: typeof(Rules.optional)
-	end
-
-	do -- Literal
-		Constructors.literal = function(Negated: boolean)
-			local Expected = not Negated
-
-			return function(...)
-				local LiteralCount = select("#", ...)
-
-				if LiteralCount == 1 then
-					local ExpectedValue = (...)
-
-					local Message = if Negated
-						then `Value cannot be {ExpectedValue}`
-						else `Value is not {ExpectedValue}`
-
-					return function(Value: unknown)
-						local Success = Value == ExpectedValue
-
-						if Success == Expected then
-							return true
-						end
-
-						return false, Message
-					end
-				end
-
-				local List = table.create(LiteralCount)
-				local Map = {}
-
-				for Index, Value in { ... } do
-					List[Index] = Value
-					Map[Value] = true
-				end
-
-				local Message = if Negated
-					then `Value cannot be one of the literals`
-					else `Value is not one of the literals`
-
-				return function(Value: unknown)
-					local Success = Map[Value] or table.find(List, Value) ~= nil
-
-					if Success == Expected then
-						return true
-					end
-
-					return false, Message
-				end
-			end
-		end
-		Constructors.Literal = Constructors.literal
-
-		Rules.literal = (nil :: any) :: (Expected: any) -> RuleValidator
-		Rules.Literal = (nil :: any) :: typeof(Rules.literal)
-	end
-
-	do -- Conditional
-		Constructors.conditional = function(Negated: boolean)
-			if Negated then
-				error("Rules.conditional can't be negated", 2)
-			end
-
-			return function(Condition: RuleValidator, Validator: RuleValidator): ConditionalRuleValidator
-				return function(ConditinalValue: unknown, Value: unknown)
-					local PassedCondition = Condition(ConditinalValue)
-
-					if not PassedCondition then
-						return true
-					end
-
-					return Validator(Value)
-				end
-			end
-		end
-		Constructors.Conditional = Constructors.conditional
-
-		Rules.conditional = (
-			nil :: any
-		) :: (Condition: RuleValidator, Validator: RuleValidator) -> ConditionalRuleValidator
-		Rules.Conditional = (nil :: any) :: typeof(Rules.conditional)
-	end
 end
 
 do -- Primitives
@@ -340,6 +201,395 @@ do -- Primitives
 	Rules.strict_number = (nil :: any) :: RuleValidator
 	Rules.strictnumber = (nil :: any) :: RuleValidator
 	Rules.StrictNumber = (nil :: any) :: RuleValidator
+end
+
+do -- Special
+	Constructors.set = function(Negated: boolean)
+		if Negated then
+			error("Rules.set can't be negated", 2)
+		end
+
+		return function(...: RuleValidator): VarargRuleValidator
+			local RuleSet = { ... }
+			local ArgCounts = table.create(#RuleSet, 0)
+
+			local ExpectedArgumentCount = 0
+			for Index, Rule in RuleSet do
+				if type(Rule) ~= "function" then
+					error(`#{Index}: Expected rule, got {typeof(Rule)}`)
+				end
+
+				local ArgCount, Vararg = debug.info(Rule, "a")
+				ArgCounts[Index] = ArgCount
+
+				if Vararg then
+					error(`#{Index}: Rule cannot take variable amount of arguments`)
+				elseif ArgCount == 0 then
+					error(`#{Index}: Rule must take atleast one argument`)
+				end
+
+				ExpectedArgumentCount += ArgCount
+			end
+
+			return function(...: unknown)
+				local Arguments = table.pack(...)
+				local Count = Arguments.n
+
+				if Count ~= ExpectedArgumentCount then
+					if Count > ExpectedArgumentCount then
+						return false, `Got more than {ExpectedArgumentCount} arguments`
+					end
+
+					Arguments.n = ExpectedArgumentCount
+				end
+
+				local Cursor = 1
+				for Index, Rule in RuleSet do
+					local ArgCount = ArgCounts[Index]
+
+					local Success, Message = Rule(table.unpack(Arguments, Cursor, Cursor + ArgCount))
+					if not Success then
+						return false, `#{Index}: {Message}`
+					end
+
+					Cursor += ArgCount
+				end
+
+				return true
+			end
+		end
+	end
+	Constructors.Set = Constructors.set
+
+	Rules.set = (nil :: any) :: (...RuleValidator) -> VarargRuleValidator
+	Rules.Set = (nil :: any) :: typeof(Rules.set)
+
+	Constructors.all = function(Negated: boolean)
+		if Negated then
+			error("Rules.all can't be negated", 2)
+		end
+
+		return function(...: RuleValidator): RuleValidator
+			local RuleSet = { ... }
+			
+			for Index, RuleValidator in RuleSet do
+				if type(RuleValidator) ~= "function" then
+					error(`#{Index}: Expected rule, got {typeof(RuleValidator)}`, 2)
+				end
+			end
+
+			return function(Value: unknown)
+				for Index, RuleValidator in RuleSet do
+					local Success, Message = RuleValidator(Value)
+					if not Success then
+						return false, Message
+					end
+				end
+
+				return true
+			end
+		end
+	end
+	Constructors.All = Constructors.all
+
+	Rules.all = (nil :: any) :: (...RuleValidator) -> VarargRuleValidator
+	Rules.All = (nil :: any) :: typeof(Rules.all)
+
+	Constructors.var_arg = function(Negated: boolean)
+		if Negated then
+			error("Rules.var_arg can't be negated", 2)
+		end
+
+		return function(Validator: RuleValidator): VarargRuleValidator
+			Assert(Rules.Callback(Validator))
+
+			local ArgSize = debug.info(Validator, "a")
+			ArgSize = math.max(ArgSize, 1)
+
+			return function(...: unknown)
+				local Arguments = table.pack(...)
+
+				local Needed = -Arguments.n % ArgSize
+				if Needed ~= 0 then
+					Arguments.n += Needed
+				end
+
+				for Index = 1, Arguments.n, ArgSize do
+					local Success, Message = Validator(table.unpack(Arguments, Index, Index + ArgSize - 1))
+
+					if not Success then
+						return false, `#{Index}: {Message}`
+					end
+				end
+
+				return true
+			end
+		end
+	end
+	Constructors.vararg = Constructors.var_arg
+	Constructors.VarArg = Constructors.var_arg
+
+	Rules.var_arg = (nil :: any) :: (Rule: RuleValidator) -> VarargRuleValidator
+	Rules.vararg = (nil :: any) :: typeof(Rules.var_arg)
+	Rules.VarArg = (nil :: any) :: typeof(Rules.var_arg)
+
+	Constructors.union = function(Negated: boolean)
+		if Negated then
+			error("Rules.union can't be negated", 2)
+		end
+
+		return function(...: RuleValidator): RuleValidator
+			local RuleSet = { ... }
+			
+			for Index, RuleValidator in RuleSet do
+				if type(RuleValidator) ~= "function" then
+					error(`#{Index}: Provided validator is not a function`, 2)
+				end
+			end
+
+			return function(Value: unknown)
+				local FirstMessage: string = nil
+
+				for Index, RuleValidator in RuleSet do
+					local Success, Message = RuleValidator(Value)
+
+					if not Success then
+						if not FirstMessage and Message then
+							FirstMessage = Message
+						end
+					else
+						return true
+					end
+				end
+
+				return false, FirstMessage
+			end
+		end
+	end
+	Constructors.Union = Constructors.union
+
+	Rules.union = (nil :: any) :: (...RuleValidator) -> RuleValidator
+	Rules.Union = (nil :: any) :: typeof(Rules.union)
+
+	Constructors.strict = function(Negated: boolean)
+		if Negated then
+			error("Rules.strict can't be negated", 2)
+		end
+		
+		return function<T>(Validator: T & (RuleValidator | VarargRuleValidator)): T
+			Assert(Rules.Callback(Validator))
+			
+			return (function(...: unknown)
+				local Success, Message = (Validator :: RuleValidator)(...)
+
+				if not Success then
+					assert(false, Message)
+				end
+
+				return true
+			end :: any) :: T
+		end
+	end
+	Constructors.Strict = Constructors.strict
+
+	Rules.strict = (nil :: any) :: <T>(Rule: T & (RuleValidator | VarargRuleValidator)) -> T
+	Rules.Strict = (nil :: any) :: typeof(Rules.strict)
+
+	Rules.custom = function<T>(Constructor: Constructor<T>, Names: string | { string })
+		if type(Names) == "string" then
+			Constructors[Names] = Constructor
+			return
+		end
+
+		for _, Name in Names :: { string } do
+			Constructors[Name] = Constructor
+		end
+	end
+	Rules.Custom = Rules.custom
+
+	Rules.wrapped = function<Args..., Rets...>(Callback: (Args...) -> Rets..., Validator: RuleValidator): (Args...) -> Rets...
+		return function(...: Args...)
+			local Success, Message = Validator(...)
+
+			if not Success then
+				assert(false, Message)
+			end
+
+			return Callback(...)
+		end
+	end
+	Rules.Wrapped = Rules.wrapped
+end
+
+do -- Basic
+	do -- Void
+		Constructors.void = function(Negated: boolean)
+			local Message = if Negated then "Value is void" else "Value isn't void"
+			local Expected = not Negated
+
+			return function(...: unknown)
+				local Success = select("#", ...) == 0
+
+				if Success == Expected then
+					return true
+				end
+
+				return false, Message
+			end
+		end
+		Constructors.Void = Constructors.void
+
+		Rules.void = (nil :: any) :: RuleValidator
+		Rules.Void = (nil :: any) :: typeof(Rules.void)
+	end
+
+	do -- None
+		Constructors.none = function(Negated: boolean)
+			local Message = if Negated then "Value is nil" else "Value isn't nil"
+			local Expected = not Negated
+
+			return function(Value: unknown)
+				local Success = Value == nil
+
+				if Success == Expected then
+					return true
+				end
+
+				return false, Message
+			end
+		end
+		Constructors.None = Constructors.none
+
+		Rules.none = (nil :: any) :: RuleValidator
+		Rules.None = (nil :: any) :: typeof(Rules.none)
+	end
+
+	do -- Optional
+		Constructors.optional = function(Negated: boolean)
+			if Negated then
+				error("Rules.optional can't be negated", 2)
+			end
+
+			return function(Validator: RuleValidator)
+				Assert(Rules.Callback(Validator))
+				
+				return function(Value: unknown)
+					if Value == nil then
+						return true
+					end
+
+					return Validator(Value)
+				end :: RuleValidator
+			end
+		end
+		Constructors.Optional = Constructors.optional
+
+		Rules.optional = (nil :: any) :: (Validator: RuleValidator) -> RuleValidator
+		Rules.Optional = (nil :: any) :: typeof(Rules.optional)
+	end
+
+	do -- Literal
+		Constructors.literal = function(Negated: boolean)
+			local Expected = not Negated
+
+			return function(...)
+				local LiteralCount = select("#", ...)
+
+				if LiteralCount == 1 then
+					local ExpectedValue = (...)
+
+					local Message = if Negated
+						then `Value cannot be {ExpectedValue}`
+						else `Value is not {ExpectedValue}`
+
+					return function(Value: unknown)
+						local Success = Value == ExpectedValue
+
+						if Success == Expected then
+							return true
+						end
+
+						return false, Message
+					end
+				end
+
+				local List = table.create(LiteralCount)
+				local ReadableList = {}
+				local Map = {}
+
+				for Index, Value in { ... } do
+					local Index = #List + 1
+					
+					if not Map[Value] then
+						List[Index] = Value
+						local ValueType = type(Value)
+						
+						if ValueType == "string" then
+							ReadableList[Index] = `"{Value}"`
+						elseif ValueType == "table" then
+							ReadableList[Index] = "{...}"
+						elseif ValueType == "userdata" then
+							ReadableList[Index] = "(proxy)"
+						end
+					end
+					
+					Map[Value] = true
+				end
+				
+				local StringList = table.concat(ReadableList, ", ")
+				local IsShort = string.len(StringList) <= 255
+
+				local Message = if Negated
+					then `Value cannot be one of the literals{if IsShort then `: {StringList}` else ""}`
+					else `Value is not one of the literals{if IsShort then `: {StringList}` else ""}`
+
+				return function(Value: unknown)
+					local Success = Map[Value] or table.find(List, Value) ~= nil
+
+					if Success == Expected then
+						return true
+					end
+
+					return false, Message
+				end
+			end
+		end
+		Constructors.Literal = Constructors.literal
+
+		Rules.literal = (nil :: any) :: (Expected: any) -> RuleValidator
+		Rules.Literal = (nil :: any) :: typeof(Rules.literal)
+	end
+
+	do -- Conditional
+		Constructors.conditional = function(Negated: boolean)
+			if Negated then
+				error("Rules.conditional can't be negated", 2)
+			end
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Callback,
+				Rules.Callback
+			)
+			
+			return function(Condition: RuleValidator, Validator: RuleValidator): ConditionalRuleValidator
+				Assert(ArgumentValidator(Condition, Validator))
+				
+				return function(ConditinalValue: unknown, Value: unknown)
+					local PassedCondition = Condition(ConditinalValue)
+
+					if not PassedCondition then
+						return true
+					end
+
+					return Validator(Value)
+				end
+			end
+		end
+		Constructors.Conditional = Constructors.conditional
+
+		Rules.conditional = (nil :: any) :: (Condition: RuleValidator, Validator: RuleValidator) -> ConditionalRuleValidator
+		Rules.Conditional = (nil :: any) :: typeof(Rules.conditional)
+	end
 end
 
 do -- Classes
@@ -618,6 +868,8 @@ do -- Enums
 		end
 
 		return function(EnumType: Enum): RuleValidator
+			Assert(Rules.Enum(EnumType))
+			
 			return function(Value: unknown)
 				if typeof(Value) ~= "EnumItem" then
 					return false, "Value isn't of type 'EnumItem'"
@@ -755,6 +1007,8 @@ do -- Values
 			local Expected = not Negated
 
 			return function(Class: string): RuleValidator
+				Assert(Rules.string(Class))
+				
 				local Article = Vowels[Class:sub(1, 1):lower()] and "an" or "a"
 				local Message = if Negated
 					then `Value cannot be {Article} {Class}`
@@ -783,8 +1037,10 @@ do -- Values
 
 		Constructors.descendant_of = function(Negated: boolean)
 			local Expected = not Negated
-
+			
 			return function(Inst: Instance)
+				Assert(Rules.Instance(Inst))
+				
 				local Message = if Negated
 					then `Value cannot be a descendant of {Inst.Name}`
 					else `Value is not a descendant of {Inst.Name}`
@@ -822,7 +1078,7 @@ do -- Values
 			Validator: RuleValidator,
 			TreatTablesAsValues: boolean?,
 			Recursive: boolean?
-		)
+		): (boolean, string?)
 			if type(Value) ~= "table" then
 				return false, "Value isn't of type 'table'"
 			end
@@ -877,27 +1133,42 @@ do -- Values
 
 			return false, Message
 		end
-
+		
 		Constructors.values = function(Negated: boolean)
 			local _Expected = Negated
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Callback,
+				Rules.Optional(Rules.Boolean),
+				Rules.Optional(Rules.Boolean)
+			)
 
 			return function(Validator: RuleValidator, TreatTablesAsValues: boolean?, Recursive: boolean?): RuleValidator
+				Assert(ArgumentValidator(Validator, TreatTablesAsValues, Recursive))
+
 				return function(Value: unknown)
 					return Validate(Value, true, Validator, TreatTablesAsValues, Recursive)
 				end
 			end
 		end
 		Constructors.Values = Constructors.values
-
+		
 		Rules.values = (
 			nil :: any
 		) :: (Validator: RuleValidator, TreatTablesAsValues: boolean?, Recursive: boolean?) -> RuleValidator
 		Rules.Values = (nil :: any) :: typeof(Rules.values)
-
+		
 		Constructors.keys = function(Negated: boolean)
 			local _Expected = Negated
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Callback,
+				Rules.Optional(Rules.Boolean)
+			)
 
 			return function(Validator: RuleValidator, Recursive: boolean?): RuleValidator
+				Assert(ArgumentValidator(Validator, Recursive))
+				
 				return function(Value: unknown)
 					return Validate(Value, true, Validator, false, Recursive)
 				end
@@ -910,36 +1181,70 @@ do -- Values
 	end
 
 	do -- Size
-		Constructors.string_length = function(Negated: boolean)
+		local function SizeValidator(
+			Negated: boolean, 
+			Type: string,
+			CheckFunction: (any) -> number,
+			Size: string,
+			Quantity: string,
+			HasVerb: boolean
+		): (MinOrMax: number, Max: number?) -> RuleValidator
 			local Expected = not Negated
+			local ArgumentValidator = Rules.Set(
+				Rules.Number,
+				Rules.Optional(Rules.Number)
+			)
 
-			return function(MaxLength: number, Exact: boolean?): RuleValidator
+			return function(MinOrMax: number, Max: number?)
+				assert(ArgumentValidator(MinOrMax, Max))
+
 				local Message: string = nil
-
+				local Exact = MinOrMax == Max
+				local SpecificRange = Max ~= nil
+				
 				if Exact == true then
+					Message = if Negated then
+						`Value {if HasVerb then "doesn't have" else "is not"} exactly {MinOrMax} {Quantity}(s)`
+						else `Value cannot {if HasVerb then "have" else "be"} exactly {MinOrMax} {Quantity}(s)`
+				elseif SpecificRange then
 					Message = if Negated
-						then `Value is not {MaxLength} characters`
-						else `Value cannot be {MaxLength} characters`
+						then `Value {Size} is out of the range [{MinOrMax}..{Max}]`
+						else `Value {Size} cannot be in the range [{MinOrMax}..{Max}]`
 				else
 					Message = if Negated
-						then `Value is shorter than {MaxLength} characters`
-						else `Value is longer than {MaxLength} characters`
+						then `Value {Size} is out of the range [0..{MinOrMax}]`
+						else `Value {Size} cannot be in the range [0..{MinOrMax}]`
 				end
 
 				return function(Value: unknown)
-					if type(Value) ~= "string" then
-						return false, "Value isn't of type 'string'"
+					if type(Value) ~= Type then
+						return false, `Value isn't of type '{Type}'`
 					end
 
-					local Length = string.len(Value :: string)
-					local Success = if Exact then Length == MaxLength else Length <= MaxLength
-					if Success == Expected then
-						return true
+					local Length = CheckFunction(Value :: any)
+
+					if Exact then
+						local Success = Length == MinOrMax 
+						if Success == Expected then
+							return true
+						end
+					else
+						local RangeMin = if SpecificRange then MinOrMax else 0
+						local RangeMax = if SpecificRange then Max :: number else MinOrMax
+
+						local Success = Length >= RangeMin and Length <= RangeMax
+						if Success == Expected then
+							return true
+						end
 					end
 
 					return false, Message
 				end
 			end
+		end
+		
+		Constructors.string_length = function(Negated: boolean)
+			return SizeValidator(Negated, "string", string.len, "character", "length", false)
 		end
 		Constructors.stringlength = Constructors.string_length
 		Constructors.StringLength = Constructors.string_length
@@ -949,33 +1254,7 @@ do -- Values
 		Rules.StringLength = (nil :: any) :: typeof(Rules.string_length)
 
 		Constructors.buffer_size = function(Negated: boolean)
-			local Expected = not Negated
-
-			return function(MaxLength: number, Exact: boolean?): RuleValidator
-				local Message: string = nil
-
-				if Exact == true then
-					Message = if Negated then `Value is not {MaxLength} bytes` else `Value cannot be {MaxLength} bytes`
-				else
-					Message = if Negated
-						then `Value is shorter than {MaxLength} bytes`
-						else `Value is longer than {MaxLength} bytes`
-				end
-
-				return function(Value: unknown)
-					if type(Value) ~= "buffer" then
-						return false, "Value isn't of type 'buffer'"
-					end
-
-					local Length = buffer.len(Value :: buffer)
-					local Success = if Exact then Length == MaxLength else Length <= MaxLength
-					if Success == Expected then
-						return true
-					end
-
-					return false, Message
-				end
-			end
+			return SizeValidator(Negated, "buffer", buffer.len, "byte", "size", false)
 		end
 		Constructors.buffersize = Constructors.buffer_size
 		Constructors.BufferSize = Constructors.buffer_size
@@ -985,39 +1264,17 @@ do -- Values
 		Rules.BufferSize = (nil :: any) :: typeof(Rules.buffer_size)
 
 		Constructors.table_size = function(Negated: boolean)
-			local Expected = not Negated
-
-			return function(MaxSize: number, Exact: boolean?): RuleValidator
-				local Message: string = nil
-
-				if Exact == true then
-					Message = if Negated
-						then `Value doesn't have {MaxSize} elements`
-						else `Value cannot have {MaxSize} elements`
-				else
-					Message = if Negated
-						then `Value has less than {MaxSize} elements`
-						else `Value has more than {MaxSize} elements`
+			local function GetSize(Table: {}): number
+				local Count = 0
+				
+				for _ in Table do
+					Count += 1
 				end
-
-				return function(Value: unknown)
-					if type(Value) ~= "table" then
-						return false, "Value isn't of type 'table'"
-					end
-
-					local Count = 0
-					for _ in Value :: {} do
-						Count += 1
-					end
-
-					local Success = if Exact then Count == MaxSize else Count <= MaxSize
-					if Success == Expected then
-						return true
-					end
-
-					return false, Message
-				end
+				
+				return Count
 			end
+
+			return SizeValidator(Negated, "table", GetSize, "byte", "size", true)
 		end
 		Constructors.tablesize = Constructors.table_size
 		Constructors.TableSize = Constructors.table_size
@@ -1027,35 +1284,7 @@ do -- Values
 		Rules.TableSize = (nil :: any) :: typeof(Rules.table_size)
 
 		Constructors.array_size = function(Negated: boolean)
-			local Expected = not Negated
-
-			return function(MaxSize: number, Exact: boolean?): RuleValidator
-				local Message: string = nil
-
-				if Exact == true then
-					Message = if Negated
-						then `Value doesn't have {MaxSize} elements`
-						else `Value cannot have {MaxSize} elements`
-				else
-					Message = if Negated
-						then `Value has less than {MaxSize} elements`
-						else `Value has more than {MaxSize} elements`
-				end
-
-				return function(Value: unknown)
-					if type(Value) ~= "table" then
-						return false, "Value isn't of type 'table'"
-					end
-
-					local Count = table.maxn(Value :: {})
-					local Success = if Exact then Count == MaxSize else Count <= MaxSize
-					if Success == Expected then
-						return true
-					end
-
-					return false, Message
-				end
-			end
+			return SizeValidator(Negated, "table", table.maxn, "byte", "size", true)
 		end
 		Constructors.arraysize = Constructors.array_size
 		Constructors.ArraySize = Constructors.array_size
@@ -1114,13 +1343,12 @@ do -- Values
 			local Expected = not Negated
 
 			return function(Value: unknown)
-				local IsNumber, TypeError = Rules.strict_number(Value)
-				if not IsNumber then
-					return false, TypeError
+				if type(Value) ~= "number" then
+					return false, "Value isn't of type 'number'"
 				end
-
-				if Rules.infinite(Value) then
-					return false, "Value is infinite"
+				
+				if Value == math.huge then
+					return false, "Value cannot be infinite"
 				end
 
 				local _Integral, Fractional = math.modf(Value :: number)
@@ -1130,7 +1358,7 @@ do -- Values
 				end
 
 				return false, Message
-			end
+			end :: RuleValidator
 		end
 		Constructors.Integer = Constructors.integer
 
@@ -1189,8 +1417,15 @@ do -- Values
 
 		Constructors.in_range_inclusive = function(Negated: boolean)
 			local Expected = not Negated
-
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Number,
+				Rules.Number
+			)
+			
 			return function(Min: number, Max: number)
+				Assert(ArgumentValidator(Min, Max))
+				
 				local Message = if Negated
 					then `Value must be outside the range of [{Min}..{Max}]`
 					else `Value is outside the range of [{Min}..{Max}]`
@@ -1219,8 +1454,15 @@ do -- Values
 
 		Constructors.in_range_exclusive = function(Negated: boolean)
 			local Expected = not Negated
-
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Number,
+				Rules.Number
+			)
+			
 			return function(Min: number, Max: number)
+				Assert(ArgumentValidator(Min, Max))
+				
 				local Message = if Negated
 					then `Value must be outside the range of [{Min}..{Max})`
 					else `Value is outside the range of [{Min}..{Max})`
@@ -1249,6 +1491,8 @@ do -- Values
 
 		Constructors.minimum = function(Negated: boolean)
 			return function(Min: number)
+				Assert(Rules.Number(Min))
+				
 				return Constructors.in_range_inclusive(Negated)(Min, math.huge)
 			end
 		end
@@ -1259,6 +1503,8 @@ do -- Values
 
 		Constructors.maximum = function(Negated: boolean)
 			return function(Max: number)
+				Assert(Rules.Number(Max))
+				
 				return Constructors.in_range_inclusive(Negated)(-math.huge, Max)
 			end
 		end
@@ -1269,8 +1515,15 @@ do -- Values
 
 		Constructors.epsilon = function(Negated: boolean)
 			local Expected = not Negated
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Number,
+				Rules.Number
+			)
 
 			return function(Number: number, Epsilon: number)
+				Assert(ArgumentValidator(Number, Epsilon))
+				
 				local Message = if Negated
 					then `Value cannot be within {Epsilon} of {Number}`
 					else `Value is not within {Epsilon} of {Number}`
@@ -1366,8 +1619,15 @@ do -- Values
 			if Negated then
 				error("Rules.struct can't be negated", 2)
 			end
+			
+			local ArgumentValidator = Rules.Set(
+				Rules.Table,
+				Rules.Optional(Rules.Boolean)
+			)
 
 			return function(TableStructure: { [any]: RuleValidator }, Strict: boolean?): RuleValidator
+				Assert(ArgumentValidator(TableStructure, Strict))
+				
 				return function(Value: unknown)
 					if type(Value) ~= "table" then
 						return false, "Value isn't of type 'table'"
@@ -1409,13 +1669,13 @@ do -- Values
 
 		Rules.struct = (nil :: any) :: (TableStructure: { [any]: RuleValidator }, Strict: boolean?) -> RuleValidator
 		Rules.Struct = (nil :: any) :: typeof(Rules.struct)
-
+		
 		Constructors.strict_struct = function(Negated: boolean)
 			if Negated then
 				error("Rules.struct can't be negated", 2)
 			end
 
-			local StructConstructor = Constructors.strict(Negated)
+			local StructConstructor = Constructors.struct(Negated)
 			return function(TableStructure: { [any]: RuleValidator }): RuleValidator
 				return StructConstructor(TableStructure, true)
 			end
@@ -1434,6 +1694,8 @@ do -- Values
 		end
 
 		return function(MaxDepth: number): RuleValidator
+			Assert(Rules.Number(MaxDepth))
+			
 			return function(Value: unknown)
 				if type(Value) ~= "table" then
 					return false, "Value isn't of type 'table'"
@@ -1482,11 +1744,18 @@ do -- Values
 
 	Constructors.match = function(Negated: boolean)
 		local Expected = not Negated
-
+		
+		local ArgumentValidator = Rules.Set(
+			Rules.String,
+			Rules.Optional(Rules.Boolean)
+		)
+		
 		return function(Expression: string, Exact: boolean?)
+			Assert(ArgumentValidator(Expression, Exact))
+			
 			local Message = if Negated
-				then `Value must not match the regex expression '{Expression}'`
-				else `Value doesn't match the regex expression '{Expression}'`
+				then `Value must not match the regex '{Expression}'`
+				else `Value doesn't match the regex '{Expression}'`
 
 			return function(Value: unknown)
 				if type(Value) ~= "string" then
@@ -1514,13 +1783,15 @@ do -- Values
 	end :: (string) -> string
 	
 	Constructors.uuid_v4 = function(Negated: boolean)
+		local UUIDPattern = "[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12"
+		
 		local Expression = Constructors.match(Negated)((string.gsub(
-			"[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12",
+			UUIDPattern,
 			ExtendSyntaxPattern, PatternExtender
 		)))
 		
 		local BracketExpression = Constructors.match(Negated)((string.gsub(
-			"{[%x]$8%-[%x]$4%-[89abAB][%x]$3%-[%x]$4%-[%x]$12}",
+			`\{{UUIDPattern}\}`,
 			ExtendSyntaxPattern, PatternExtender
 		)))
 		
@@ -1546,218 +1817,6 @@ do -- Values
 	Rules.uuid_v4 = (nil :: any) :: RuleValidator
 	Rules.uuidv4 = (nil :: any) :: RuleValidator
 	Rules.UUIDv4 = (nil :: any) :: RuleValidator
-end
-
-do -- Special
-	Constructors.set = function(Negated: boolean)
-		if Negated then
-			error("Rules.set can't be negated", 2)
-		end
-
-		return function(...: RuleValidator): VarargRuleValidator
-			local RuleSet = { ... }
-			local ArgCounts = table.create(#RuleSet, 0)
-
-			local ExpectedArgumentCount = 0
-			for Index, Rule in RuleSet do
-				if type(Rule) ~= "function" then
-					error(`#{Index}: Expected rule, got {typeof(Rule)}`)
-				end
-
-				local ArgCount, Vararg = debug.info(Rule, "a")
-				ArgCounts[Index] = ArgCount
-
-				if Vararg then
-					error(`#{Index}: Rule cannot take variable amount of arguments`)
-				elseif ArgCount == 0 then
-					error(`#{Index}: Rule must take atleast one argument`)
-				end
-
-				ExpectedArgumentCount += ArgCount
-			end
-
-			return function(...: unknown)
-				local Arguments = table.pack(...)
-				local Count = Arguments.n
-
-				if Count ~= ExpectedArgumentCount then
-					if Count > ExpectedArgumentCount then
-						return false, `Got more than {ExpectedArgumentCount} arguments`
-					end
-
-					Arguments.n = ExpectedArgumentCount
-				end
-
-				local Cursor = 1
-				for Index, Rule in RuleSet do
-					local ArgCount = ArgCounts[Index]
-
-					local Success, Message = Rule(table.unpack(Arguments, Cursor, Cursor + ArgCount))
-					if not Success then
-						return false, `#{Index}: {Message}`
-					end
-
-					Cursor += ArgCount
-				end
-
-				return true
-			end
-		end
-	end
-	Constructors.Set = Constructors.set
-
-	Rules.set = (nil :: any) :: (...RuleValidator) -> VarargRuleValidator
-	Rules.Set = (nil :: any) :: typeof(Rules.set)
-
-	Constructors.all = function(Negated: boolean)
-		if Negated then
-			error("Rules.all can't be negated", 2)
-		end
-
-		return function(...: RuleValidator): RuleValidator
-			local RuleSet = { ... }
-
-			return function(Value: unknown)
-				for Index, RuleValidator in RuleSet do
-					if type(RuleValidator) ~= "function" then
-						return false, `#{Index}: Expected rule, got {typeof(RuleValidator)}`
-					end
-
-					local Success, Message = RuleValidator(Value)
-					if not Success then
-						return false, Message
-					end
-				end
-
-				return true
-			end
-		end
-	end
-	Constructors.All = Constructors.all
-
-	Rules.all = (nil :: any) :: (...RuleValidator) -> VarargRuleValidator
-	Rules.All = (nil :: any) :: typeof(Rules.all)
-
-	Constructors.var_arg = function(Negated: boolean)
-		if Negated then
-			error("Rules.var_arg can't be negated", 2)
-		end
-
-		return function(Validator: RuleValidator): VarargRuleValidator
-			assert(Rules.callback(Validator))
-
-			local ArgSize = debug.info(Validator, "a")
-			ArgSize = math.max(ArgSize, 1)
-
-			return function(...: unknown)
-				local Arguments = table.pack(...)
-
-				local Needed = -Arguments.n % ArgSize
-				if Needed ~= 0 then
-					Arguments.n += Needed
-				end
-
-				for Index = 1, Arguments.n, ArgSize do
-					local Success, Message = Validator(table.unpack(Arguments, Index, Index + ArgSize - 1))
-
-					if not Success then
-						return false, `#{Index}: {Message}`
-					end
-				end
-
-				return true
-			end
-		end
-	end
-	Constructors.vararg = Constructors.var_arg
-	Constructors.VarArg = Constructors.var_arg
-
-	Rules.var_arg = (nil :: any) :: (Rule: RuleValidator) -> VarargRuleValidator
-	Rules.vararg = (nil :: any) :: typeof(Rules.var_arg)
-	Rules.VarArg = (nil :: any) :: typeof(Rules.var_arg)
-
-	Constructors.union = function(Negated: boolean)
-		if Negated then
-			error("Rules.union can't be negated", 2)
-		end
-
-		return function(...: RuleValidator): RuleValidator
-			local RuleSet = { ... }
-
-			return function(Value: unknown)
-				local FirstMessage: string = nil
-
-				for Index, RuleValidator in RuleSet do
-					if type(RuleValidator) ~= "function" then
-						return false, `#{Index}: Provided validator is not a function`
-					end
-
-					local Success, Message = RuleValidator(Value)
-
-					if not Success then
-						if not FirstMessage and Message then
-							FirstMessage = Message
-						end
-					else
-						return true
-					end
-				end
-
-				return false, FirstMessage
-			end
-		end
-	end
-	Constructors.Union = Constructors.union
-
-	Rules.union = (nil :: any) :: (...RuleValidator) -> RuleValidator
-	Rules.Union = (nil :: any) :: typeof(Rules.union)
-
-	Constructors.strict = function(Negated: boolean)
-		if Negated then
-			error("Rules.strict can't be negated", 2)
-		end
-
-		return function(Validator: RuleValidator): (Value: unknown) -> boolean
-			return function(Value: unknown)
-				local Success, Message = Validator(Value)
-
-				if not Success then
-					assert(false, Message)
-				end
-				
-				return true
-			end
-		end
-	end
-	Constructors.Strict = Constructors.strict
-
-	Rules.strict = (nil :: any) :: (Rule: RuleValidator) -> (Value: unknown) -> boolean
-	Rules.Strict = (nil :: any) :: typeof(Rules.strict)
-
-	Rules.custom = function<T>(Constructor: Constructor<T>, Names: string | { string })
-		if type(Names) == "string" then
-			Constructors[Names] = Constructor
-			return
-		end
-
-		for _, Name in Names :: { string } do
-			Constructors[Name] = Constructor
-		end
-	end
-	Rules.Custom = Rules.custom
-
-	Rules.wrapped = function<Args..., Rets...>(Callback: (Args...) -> Rets..., Validator: RuleValidator): (Args...) -> Rets...
-		return function(...: Args...)
-			local Success, Message = Validator(...)
-
-			if not Success then
-				assert(false, Message)
-			end
-
-			return Callback(...)
-		end
-	end
-	Rules.Wrapped = Rules.wrapped
 end
 
 return Rules
