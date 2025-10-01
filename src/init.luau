@@ -265,9 +265,7 @@ do -- Special
 	Rules.Set = (nil :: any) :: typeof(Rules.set)
 
 	Constructors.all = function(Negated: boolean)
-		if Negated then
-			error("Rules.all can't be negated", 2)
-		end
+		local Expected = Negated
 
 		return function(...: RuleValidator): RuleValidator
 			local RuleSet = { ... }
@@ -281,12 +279,12 @@ do -- Special
 			return function(Value: unknown)
 				for Index, RuleValidator in RuleSet do
 					local Success, Message = RuleValidator(Value)
-					if not Success then
-						return false, Message
+					if Success == false then
+						return Expected, Message
 					end
 				end
 
-				return true
+				return not Expected
 			end
 		end
 	end
@@ -462,6 +460,27 @@ do -- Basic
 
 		Rules.none = (nil :: any) :: RuleValidator
 		Rules.None = (nil :: any) :: typeof(Rules.none)
+	end
+	
+	do -- Any
+		Constructors.any = function(Negated: boolean)
+			local Message = if Negated then "Value isn't nil" else "Value is nil"
+			local Expected = not Negated
+
+			return function(Value: unknown)
+				local Success = Value ~= nil
+
+				if Success == Expected then
+					return true
+				end
+
+				return false, Message
+			end
+		end
+		Constructors.Any = Constructors.any
+
+		Rules.any = (nil :: any) :: RuleValidator
+		Rules.Any = (nil :: any) :: typeof(Rules.any)
 	end
 
 	do -- Optional
@@ -900,7 +919,9 @@ do -- Type Variants
 				end
 
 				local ValueCasted = Value :: {}
-				local Key = next(ValueCasted, table.maxn(ValueCasted))
+				local ArraySize = table.maxn(ValueCasted)
+				
+				local Key = next(ValueCasted, if ArraySize > 0 then table.maxn(ValueCasted) else nil)
 
 				local Success = Key == nil
 				if Success == Expected then
@@ -1170,7 +1191,7 @@ do -- Values
 				Assert(ArgumentValidator(Validator, Recursive))
 				
 				return function(Value: unknown)
-					return Validate(Value, true, Validator, false, Recursive)
+					return Validate(Value, false, Validator, false, Recursive)
 				end
 			end
 		end
@@ -1709,6 +1730,8 @@ do -- Values
 					if Seen[Table] then
 						return
 					end
+					
+					Seen[Table] = true
 
 					if Depth > MaxDepthRecorded then
 						MaxDepthRecorded = Depth
